@@ -98,6 +98,7 @@ start_quic(Ref, TransOpts, ProtoOpts) ->
 		{peer_unidi_stream_count, 3}, %% We only need control and QPACK enc/dec.
 		{peer_bidi_stream_count, 100}
 	|SocketOpts2],
+  io:format("QUIC start config: ~p~n", [SocketOpts]),
 	_ListenerPid = spawn(fun() ->
 		{ok, Listener} = quicer:listen(Port, SocketOpts),
 		Parent ! {ok, Listener},
