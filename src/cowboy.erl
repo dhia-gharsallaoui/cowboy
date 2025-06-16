@@ -21,7 +21,6 @@
 -export([get_env/2]).
 -export([get_env/3]).
 -export([set_env/3]).
-
 %% Internal.
 -export([log/2]).
 -export([log/4]).
@@ -30,48 +29,46 @@
 -dialyzer([{nowarn_function, start_quic/3}]).
 
 -type opts() :: cowboy_http:opts() | cowboy_http2:opts().
+
 -export_type([opts/0]).
 
--type fields() :: [atom()
-	| {atom(), cowboy_constraints:constraint() | [cowboy_constraints:constraint()]}
-	| {atom(), cowboy_constraints:constraint() | [cowboy_constraints:constraint()], any()}].
+-type fields() ::
+  [atom() |
+   {atom(), cowboy_constraints:constraint() | [cowboy_constraints:constraint()]} |
+   {atom(), cowboy_constraints:constraint() | [cowboy_constraints:constraint()], any()}].
+
 -export_type([fields/0]).
 
 -type http_headers() :: #{binary() => iodata()}.
+
 -export_type([http_headers/0]).
 
 -type http_status() :: non_neg_integer() | binary().
+
 -export_type([http_status/0]).
 
 -type http_version() :: 'HTTP/2' | 'HTTP/1.1' | 'HTTP/1.0'.
+
 -export_type([http_version/0]).
 
--spec start_clear(ranch:ref(), ranch:opts(), opts())
-	-> {ok, pid()} | {error, any()}.
-
+-spec start_clear(ranch:ref(), ranch:opts(), opts()) -> {ok, pid()} | {error, any()}.
 start_clear(Ref, TransOpts0, ProtoOpts0) ->
-	TransOpts1 = ranch:normalize_opts(TransOpts0),
-	{TransOpts2, DynamicBuffer} = ensure_dynamic_buffer(TransOpts1, ProtoOpts0),
-	{TransOpts, ConnectionType} = ensure_connection_type(TransOpts2),
-	ProtoOpts = ProtoOpts0#{
-		connection_type => ConnectionType,
-		dynamic_buffer => DynamicBuffer
-	},
-	ranch:start_listener(Ref, ranch_tcp, TransOpts, cowboy_clear, ProtoOpts).
+  TransOpts1 = ranch:normalize_opts(TransOpts0),
+  {TransOpts2, DynamicBuffer} = ensure_dynamic_buffer(TransOpts1, ProtoOpts0),
+  {TransOpts, ConnectionType} = ensure_connection_type(TransOpts2),
+  ProtoOpts =
+    ProtoOpts0#{connection_type => ConnectionType, dynamic_buffer => DynamicBuffer},
+  ranch:start_listener(Ref, ranch_tcp, TransOpts, cowboy_clear, ProtoOpts).
 
--spec start_tls(ranch:ref(), ranch:opts(), opts())
-	-> {ok, pid()} | {error, any()}.
-
+-spec start_tls(ranch:ref(), ranch:opts(), opts()) -> {ok, pid()} | {error, any()}.
 start_tls(Ref, TransOpts0, ProtoOpts0) ->
-	TransOpts1 = ranch:normalize_opts(TransOpts0),
-	{TransOpts2, DynamicBuffer} = ensure_dynamic_buffer(TransOpts1, ProtoOpts0),
-	TransOpts3 = ensure_alpn(TransOpts2),
-	{TransOpts, ConnectionType} = ensure_connection_type(TransOpts3),
-	ProtoOpts = ProtoOpts0#{
-		connection_type => ConnectionType,
-		dynamic_buffer => DynamicBuffer
-	},
-	ranch:start_listener(Ref, ranch_ssl, TransOpts, cowboy_tls, ProtoOpts).
+  TransOpts1 = ranch:normalize_opts(TransOpts0),
+  {TransOpts2, DynamicBuffer} = ensure_dynamic_buffer(TransOpts1, ProtoOpts0),
+  TransOpts3 = ensure_alpn(TransOpts2),
+  {TransOpts, ConnectionType} = ensure_connection_type(TransOpts3),
+  ProtoOpts =
+    ProtoOpts0#{connection_type => ConnectionType, dynamic_buffer => DynamicBuffer},
+  ranch:start_listener(Ref, ranch_ssl, TransOpts, cowboy_tls, ProtoOpts).
 
 %% @todo Experimental function to start a barebone QUIC listener.
 %%       This will need to be reworked to be closer to Ranch
@@ -79,151 +76,173 @@ start_tls(Ref, TransOpts0, ProtoOpts0) ->
 %%
 %% @todo Better type for transport options. Might require fixing quicer types.
 
--spec start_quic(ranch:ref(), #{socket_opts => [{atom(), _}]}, cowboy_http3:opts())
-	-> {ok, pid()}.
-
+-spec start_quic(ranch:ref(), #{socket_opts => [{atom(), _}]}, cowboy_http3:opts()) ->
+                  {ok, pid()}.
 %% @todo Implement dynamic_buffer for HTTP/3 if/when it applies.
 start_quic(Ref, TransOpts, ProtoOpts) ->
-	{ok, _} = application:ensure_all_started(quicer),
-	Parent = self(),
-	SocketOpts0 = maps:get(socket_opts, TransOpts, []),
-	{Port, SocketOpts2} = case lists:keytake(port, 1, SocketOpts0) of
-		{value, {port, Port0}, SocketOpts1} ->
-			{Port0, SocketOpts1};
-		false ->
-			{port_0(), SocketOpts0}
-	end,
-	SocketOpts = [
-		{alpn, ["h3"]}, %% @todo Why not binary?
-		{peer_unidi_stream_count, 3}, %% We only need control and QPACK enc/dec.
-		{peer_bidi_stream_count, 100}
-	|SocketOpts2],
+  {ok, _} = application:ensure_all_started(quicer),
+  Parent = self(),
+  SocketOpts0 = maps:get(socket_opts, TransOpts, []),
+  {Port, SocketOpts2} =
+    case lists:keytake(port, 1, SocketOpts0) of
+      {value, {port, Port0}, SocketOpts1} ->
+        {Port0, SocketOpts1};
+      false ->
+        {port_0(), SocketOpts0}
+    end,
+  SocketOpts =
+    [{alpn, ["h3"]}, %% @todo Why not binary?
+     {peer_unidi_stream_count, 3}, %% We only need control and QPACK enc/dec.
+     {peer_bidi_stream_count, 100}
+     | SocketOpts2],
   io:format("QUIC start config: ~p~n", [SocketOpts]),
-	_ListenerPid = spawn(fun() ->
-		{ok, Listener} = quicer:listen(Port, SocketOpts),
-		Parent ! {ok, Listener},
-		_AcceptorPid = [spawn(fun AcceptLoop() ->
-			{ok, Conn} = quicer:accept(Listener, []),
-			Pid = spawn(fun() ->
-				receive go -> ok end,
-				%% We have to do the handshake after handing control of
-				%% the connection otherwise streams may come in before
-				%% the controlling process is changed and messages will
-				%% not be sent to the correct process.
-				{ok, Conn} = quicer:handshake(Conn),
-				process_flag(trap_exit, true), %% @todo Only if supervisor though.
-				try cowboy_http3:init(Parent, Ref, Conn, ProtoOpts)
-				catch
-					exit:{shutdown,_} -> ok;
-					C:E:S -> log(error, "CRASH ~p:~p:~p", [C,E,S], ProtoOpts)
-				end
-			end),
-			ok = quicer:controlling_process(Conn, Pid),
-			Pid ! go,
-			AcceptLoop()
-		end) || _ <- lists:seq(1, 20)],
-		%% Listener process must not terminate.
-		receive after infinity -> ok end
-	end),
-	receive
-		{ok, Listener} ->
-			{ok, Listener}
-	end.
+  _ListenerPid =
+    spawn(fun() ->
+             io:format("Starting quicer:listen on port ~p with opts: ~p~n", [Port, SocketOpts]),
+             case quicer:listen(Port, SocketOpts) of
+               {ok, Listener} ->
+                 Parent ! {ok, Listener},
+                 %% Continue accept loop
+                 [spawn(fun AcceptLoop() ->
+                              io:format("Waiting to accept...~n"),
+                              case quicer:accept(Listener, []) of
+                                {ok, Conn} ->
+                                  io:format("Accepted connection: ~p~n", [Conn]),
+                                  Pid =
+                                    spawn(fun() ->
+                                             receive go -> ok end,
+                                             io:format("Doing handshake...~n"),
+                                             case quicer:handshake(Conn) of
+                                               {ok, Conn1} ->
+                                                 process_flag(trap_exit, true),
+                                                 try
+                                                   cowboy_http3:init(Parent, Ref, Conn1, ProtoOpts)
+                                                 catch
+                                                   exit:{shutdown, _} -> ok;
+                                                   C:E:S ->
+                                                     log(error,
+                                                         "CRASH ~p:~p:~p",
+                                                         [C, E, S],
+                                                         ProtoOpts)
+                                                 end;
+                                               Error -> io:format("Handshake failed: ~p~n", [Error])
+                                             end
+                                          end),
+                                  ok = quicer:controlling_process(Conn, Pid),
+                                  Pid ! go,
+                                  AcceptLoop();
+                                Error -> io:format("Accept failed: ~p~n", [Error])
+                              end
+                        end)
+                  || _ <- lists:seq(1, 20)],
+                 receive after infinity -> ok end;
+               Error ->
+                 io:format("quicer:listen failed: ~p~n", [Error]),
+                 Parent ! {error, listen_failed, Error}
+             end
+          end),
+  receive
+    {ok, Listener} ->
+      {ok, Listener};
+    {error, listen_failed, Reason} ->
+      {error, config_error, Reason}
+  end.
 
 %% Select a random UDP port using gen_udp because quicer
 %% does not provide equivalent functionality. Taken from
 %% quicer test suites.
 port_0() ->
-	{ok, Socket} = gen_udp:open(0, [{reuseaddr, true}]),
-	{ok, {_, Port}} = inet:sockname(Socket),
-	gen_udp:close(Socket),
-	case os:type() of
-		{unix, darwin} ->
-			%% Apparently macOS doesn't free the port immediately.
-			timer:sleep(500);
-		_ ->
-			ok
-	end,
-	Port.
+  {ok, Socket} = gen_udp:open(0, [{reuseaddr, true}]),
+  {ok, {_, Port}} = inet:sockname(Socket),
+  gen_udp:close(Socket),
+  case os:type() of
+    {unix, darwin} ->
+      %% Apparently macOS doesn't free the port immediately.
+      timer:sleep(500);
+    _ ->
+      ok
+  end,
+  Port.
 
 ensure_alpn(TransOpts) ->
-	SocketOpts = maps:get(socket_opts, TransOpts, []),
-	TransOpts#{socket_opts => [
-		{alpn_preferred_protocols, [<<"h2">>, <<"http/1.1">>]}
-	|SocketOpts]}.
+  SocketOpts = maps:get(socket_opts, TransOpts, []),
+  TransOpts#{socket_opts =>
+               [{alpn_preferred_protocols, [<<"h2">>, <<"http/1.1">>]} | SocketOpts]}.
 
-ensure_connection_type(TransOpts=#{connection_type := ConnectionType}) ->
-	{TransOpts, ConnectionType};
+ensure_connection_type(TransOpts = #{connection_type := ConnectionType}) ->
+  {TransOpts, ConnectionType};
 ensure_connection_type(TransOpts) ->
-	{TransOpts#{connection_type => supervisor}, supervisor}.
+  {TransOpts#{connection_type => supervisor}, supervisor}.
 
 %% Dynamic buffer was set; accept transport options as-is.
 %% Note that initial 'buffer' size may be lower than dynamic buffer allows.
 ensure_dynamic_buffer(TransOpts, #{dynamic_buffer := DynamicBuffer}) ->
-	{TransOpts, DynamicBuffer};
+  {TransOpts, DynamicBuffer};
 %% Dynamic buffer was not set; define default dynamic buffer
 %% only if 'buffer' size was not configured. In that case we
 %% set the 'buffer' size to the lowest value.
-ensure_dynamic_buffer(TransOpts=#{socket_opts := SocketOpts}, _) ->
-	case proplists:get_value(buffer, SocketOpts, undefined) of
-		undefined ->
-			{TransOpts#{socket_opts => [{buffer, 1024}|SocketOpts]}, {1024, 131072}};
-		_ ->
-			{TransOpts, false}
-	end.
+ensure_dynamic_buffer(TransOpts = #{socket_opts := SocketOpts}, _) ->
+  case proplists:get_value(buffer, SocketOpts, undefined) of
+    undefined ->
+      {TransOpts#{socket_opts => [{buffer, 1024} | SocketOpts]}, {1024, 131072}};
+    _ ->
+      {TransOpts, false}
+  end.
 
 -spec stop_listener(ranch:ref()) -> ok | {error, not_found}.
-
 stop_listener(Ref) ->
-	ranch:stop_listener(Ref).
+  ranch:stop_listener(Ref).
 
 -spec get_env(ranch:ref(), atom()) -> ok.
-
 get_env(Ref, Name) ->
-	Opts = ranch:get_protocol_options(Ref),
-	Env = maps:get(env, Opts, #{}),
-	maps:get(Name, Env).
+  Opts = ranch:get_protocol_options(Ref),
+  Env = maps:get(env, Opts, #{}),
+  maps:get(Name, Env).
 
 -spec get_env(ranch:ref(), atom(), any()) -> ok.
-
 get_env(Ref, Name, Default) ->
-	Opts = ranch:get_protocol_options(Ref),
-	Env = maps:get(env, Opts, #{}),
-	maps:get(Name, Env, Default).
+  Opts = ranch:get_protocol_options(Ref),
+  Env = maps:get(env, Opts, #{}),
+  maps:get(Name, Env, Default).
 
 -spec set_env(ranch:ref(), atom(), any()) -> ok.
-
 set_env(Ref, Name, Value) ->
-	Opts = ranch:get_protocol_options(Ref),
-	Env = maps:get(env, Opts, #{}),
-	Opts2 = maps:put(env, maps:put(Name, Value, Env), Opts),
-	ok = ranch:set_protocol_options(Ref, Opts2).
+  Opts = ranch:get_protocol_options(Ref),
+  Env = maps:get(env, Opts, #{}),
+  Opts2 = maps:put(env, maps:put(Name, Value, Env), Opts),
+  ok = ranch:set_protocol_options(Ref, Opts2).
 
 %% Internal.
 
 -spec log({log, logger:level(), io:format(), list()}, opts()) -> ok.
-
 log({log, Level, Format, Args}, Opts) ->
-	log(Level, Format, Args, Opts).
+  log(Level, Format, Args, Opts).
 
 -spec log(logger:level(), io:format(), list(), opts()) -> ok.
-
-log(Level, Format, Args, #{logger := Logger})
-		when Logger =/= error_logger ->
-	_ = Logger:Level(Format, Args),
-	ok;
+log(Level, Format, Args, #{logger := Logger}) when Logger =/= error_logger ->
+  _ = Logger:Level(Format, Args),
+  ok;
 %% We use error_logger by default. Because error_logger does
 %% not have all the levels we accept we have to do some
 %% mapping to error_logger functions.
 log(Level, Format, Args, _) ->
-	Function = case Level of
-		emergency -> error_msg;
-		alert -> error_msg;
-		critical -> error_msg;
-		error -> error_msg;
-		warning -> warning_msg;
-		notice -> warning_msg;
-		info -> info_msg;
-		debug -> info_msg
-	end,
-	error_logger:Function(Format, Args).
+  Function =
+    case Level of
+      emergency ->
+        error_msg;
+      alert ->
+        error_msg;
+      critical ->
+        error_msg;
+      error ->
+        error_msg;
+      warning ->
+        warning_msg;
+      notice ->
+        warning_msg;
+      info ->
+        info_msg;
+      debug ->
+        info_msg
+    end,
+  error_logger:Function(Format, Args).
